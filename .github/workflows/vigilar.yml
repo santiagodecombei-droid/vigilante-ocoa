@@ -1,0 +1,86 @@
+# Cada 15 minutos abre las 3 apps de Ocoa (Ecommerce, Dashboard, Calendario).
+#
+# El aviso es el correo que GitHub manda solo cuando una corrida FALLA (llega a
+# la cuenta de Santiago). Para no mandar uno cada 15 minutos durante una caída:
+#   - primera corrida caída después de una sana → falla → correo;
+#   - sigue caída → la corrida se cancela sola (gris, sin correo), salvo una vez
+#     por hora (minuto < 15), que vuelve a fallar para recordar.
+#
+# «Simular caída» (Actions → Vigilar las apps → Run workflow) agrega una app
+# que no existe: sirve para comprobar que el aviso llega.
+
+name: Vigilar las apps
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      simular_caida:
+        description: 'Agregar una app caída de mentira, para probar el aviso'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # el latido mensual (ver abajo)
+  actions: write    # leer la corrida anterior y cancelarse a sí misma
+
+concurrency:
+  group: vigilar
+  cancel-in-progress: false
+
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Abrir las apps
+        id: mirar
+        env:
+          VIGILAR: ${{ secrets.VIGILAR }}
+          SIMULAR: ${{ inputs.simular_caida }}
+        run: |
+          if [ "$SIMULAR" = "true" ]; then
+            VIGILAR="$VIGILAR"$'\n''Simulacro|https://grupoocoa.com/esta-app-no-existe-vigilante|nunca'
+          fi
+          if VIGILAR="$VIGILAR" bash vigilar.sh; then
+            echo "estado=sana" >> "$GITHUB_OUTPUT"
+          else
+            echo "estado=caida" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ¿Avisar o ya se avisó?
+        if: steps.mirar.outputs.estado == 'caida'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          anterior="$(gh run list -R "$GITHUB_REPOSITORY" -w vigilar.yml -L 2 \
+                        --json databaseId,conclusion \
+                        -q "[.[] | select(.databaseId != $GITHUB_RUN_ID)][0].conclusion")"
+          minuto=$((10#$(date -u +%M)))
+          echo "corrida anterior: ${anterior:-ninguna} · minuto $minuto"
+          if [ "${{ github.event_name }}" = "schedule" ] \
+             && { [ "$anterior" = "failure" ] || [ "$anterior" = "cancelled" ]; } \
+             && [ "$minuto" -ge 15 ]; then
+            echo "Sigue caída y ya se avisó: esta corrida se cancela (sin correo)."
+            gh run cancel "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY"
+            sleep 60
+          fi
+          echo "::error::Una app de Ocoa está caída (detalle en el paso «Abrir las apps»)."
+          exit 1
+
+      # GitHub apaga los horarios de un repo público tras 60 días sin actividad.
+      # El día 1 de cada mes, a mediodía, deja una marca para que eso no pase.
+      - name: Latido mensual
+        if: github.event_name == 'schedule' && steps.mirar.outputs.estado == 'sana'
+        run: |
+          if [ "$(date -u +%d)" = "01" ] && [ "$(date -u +%H)" = "15" ] && [ $((10#$(date -u +%M))) -lt 15 ]; then
+            date -u +%Y-%m-%d > latido.txt
+            git config user.name "vigilante"
+            git config user.email "vigilante@users.noreply.github.com"
+            git add latido.txt
+            git commit -m "Latido mensual (que GitHub no apague el horario)"
+            git push
+          fi
