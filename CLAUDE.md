@@ -13,7 +13,7 @@ Para quién: Santiago (el correo le llega de GitHub); lo mantiene Claude.
   el repo es público (así los minutos de Actions son gratis y no se come los de los
   repos privados, que desplegan). Nada con datos, claves ni direcciones va al repo.
   Formato del secreto, una línea por app: `nombre|url|texto que muestra sana`.
-- Día 1 de cada mes deja un commit de latido: GitHub apaga los horarios de un repo
+- Si el repo lleva 30 días sin commits, deja uno de latido: GitHub apaga los horarios de un repo
   público tras 60 días quieto.
 
 ## Probar

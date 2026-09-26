@@ -3,8 +3,9 @@
 # El aviso es el correo que GitHub manda solo cuando una corrida FALLA (llega a
 # la cuenta de Santiago). Para no mandar uno cada 15 minutos durante una caída:
 #   - primera corrida caída después de una sana → falla → correo;
-#   - sigue caída → la corrida se cancela sola (gris, sin correo), salvo una vez
-#     por hora (minuto < 15), que vuelve a fallar para recordar.
+#   - sigue caída → la corrida se cancela sola (gris, sin correo), salvo que el
+#     último correo tenga más de 55 minutos: ahí vuelve a fallar para recordar.
+# Solo cuentan las corridas programadas (un simulacro a mano no «ya avisó»).
 #
 # «Simular caída» (Actions → Vigilar las apps → Run workflow) agrega una app
 # que no existe: sirve para comprobar que el aviso llega.
@@ -43,7 +44,7 @@ jobs:
           SIMULAR: ${{ inputs.simular_caida }}
         run: |
           if [ "$SIMULAR" = "true" ]; then
-            VIGILAR="$VIGILAR"$'\n''Simulacro|https://grupoocoa.com/esta-app-no-existe-vigilante|nunca'
+            VIGILAR="$VIGILAR"$'\n''Simulacro|https://example.com/|texto-que-nunca-aparece'
           fi
           if VIGILAR="$VIGILAR" bash vigilar.sh; then
             echo "estado=sana" >> "$GITHUB_OUTPUT"
@@ -56,14 +57,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          anterior="$(gh run list -R "$GITHUB_REPOSITORY" -w vigilar.yml -L 2 \
-                        --json databaseId,conclusion \
-                        -q "[.[] | select(.databaseId != $GITHUB_RUN_ID)][0].conclusion")"
-          minuto=$((10#$(date -u +%M)))
-          echo "corrida anterior: ${anterior:-ninguna} · minuto $minuto"
+          # Corridas programadas terminadas, sin esta: la anterior y el último correo (falla)
+          corridas="$(gh run list -R "$GITHUB_REPOSITORY" -w vigilar.yml -e schedule -L 20 \
+                        --json databaseId,conclusion,createdAt,status \
+                        -q "[.[] | select(.databaseId != $GITHUB_RUN_ID and .status == \"completed\")]")"
+          anterior="$(echo "$corridas" | jq -r '.[0].conclusion // "ninguna"')"
+          ultima_falla="$(echo "$corridas" | jq -r '[.[] | select(.conclusion == "failure")][0].createdAt // empty')"
+          hace=999
+          [ -n "$ultima_falla" ] && hace=$(( ( $(date -u +%s) - $(date -u -d "$ultima_falla" +%s) ) / 60 ))
+          echo "corrida anterior: $anterior · último correo hace $hace min"
           if [ "${{ github.event_name }}" = "schedule" ] \
              && { [ "$anterior" = "failure" ] || [ "$anterior" = "cancelled" ]; } \
-             && [ "$minuto" -ge 15 ]; then
+             && [ "$hace" -lt 55 ]; then
             echo "Sigue caída y ya se avisó: esta corrida se cancela (sin correo)."
             gh run cancel "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY"
             sleep 60
@@ -72,15 +77,15 @@ jobs:
           exit 1
 
       # GitHub apaga los horarios de un repo público tras 60 días sin actividad.
-      # El día 1 de cada mes, a mediodía, deja una marca para que eso no pase.
+      # Si el último commit tiene más de 30 días, deja una marca (no depende de la hora).
       - name: Latido mensual
         if: github.event_name == 'schedule' && steps.mirar.outputs.estado == 'sana'
         run: |
-          if [ "$(date -u +%d)" = "01" ] && [ "$(date -u +%H)" = "15" ] && [ $((10#$(date -u +%M))) -lt 15 ]; then
+          if [ $(( $(date -u +%s) - $(git log -1 --format=%ct) )) -gt $((30 * 86400)) ]; then
             date -u +%Y-%m-%d > latido.txt
             git config user.name "vigilante"
             git config user.email "vigilante@users.noreply.github.com"
             git add latido.txt
-            git commit -m "Latido mensual (que GitHub no apague el horario)"
+            git commit -m "Latido (que GitHub no apague el horario)"
             git push
           fi
